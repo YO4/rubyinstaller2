@@ -49,6 +49,7 @@ module Runtime
 
       attr_accessor :selected
       attr_accessor :headline
+      attr_accessor :pre_vt_console
 
       def initialize(ncols: 3)
         @ncols = ncols
@@ -99,12 +100,22 @@ module Runtime
         double: "╔═╗" +
                 "║ ║" +
                 "╚═╝" ,
+        text:   "+-+" +
+                "| |" +
+                "+-+" ,
+        stext:  "*=*" +
+                "H H" +
+                "*=*" ,
       }
 
       private def box_border(ncol, nrow)
         box_idx = ncol + nrow * @ncols
         selected = box_idx == @selected
-        border = BUTTON_BORDERS[selected ? :double : :thin]
+        if !@pre_vt_console
+          border = BUTTON_BORDERS[selected ? :double : :thin]
+        else
+          border = BUTTON_BORDERS[selected ? :stext : :text]
+        end
         border = border.each_char.map do |ch|
           selected ? green(ch) : blue(ch)
         end
@@ -114,6 +125,9 @@ module Runtime
 
       # Paint the boxes
       def repaint(width: @con.winsize[1], height: @con.winsize[0])
+        if @pre_vt_console
+          width -= 1 if width > 1
+        end
         headroom = headline.size > 0 ? (headline.size + width - 1) / width : 0  # roughly
         obw = (width.to_f / @ncols).floor
         spw = obw - 4
@@ -162,7 +176,7 @@ module Runtime
           line += "\n"
           slines << []
         end
-        @con.write "\e[H" "\e[J"
+        print "\e[H" "\e[J"
         print "#{headline}"
         print @con.cursor.last == 0 ? line.chomp : "\n#{line.chomp}"
         @slines = slines
@@ -180,7 +194,14 @@ module Runtime
     MOUSE_EVENT = 0x02
     WINDOW_BUFFER_SIZE_EVENT = 0x04
 
-    attr_accessor :widget
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x04
+
+    attr_reader :pre_vt_console
+    attr_reader :widget
+    def widget=(widget)
+      @widget = widget
+      widget.pre_vt_console = @pre_vt_console
+    end
 
     def initialize
       @GetStdHandle = Win32API.new('kernel32', 'GetStdHandle', ['L'], 'L')
@@ -202,18 +223,23 @@ module Runtime
     end
 
     def clear_screen
-      IO.console.write "\e[H" "\e[2J"
+      print "\e[H" "\e[2J"
     end
 
     def set_consolemode
-      @base_console_input_mode = getconsolemode
-      setconsolemode(ENABLE_PROCESSED_INPUT | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS | ENABLE_VIRTUAL_TERMINAL_INPUT)
+      @base_console_input_mode = getconsolemode(:in)
+      @base_console_output_mode = getconsolemode(:out)
+      setconsolemode(:in, ENABLE_PROCESSED_INPUT | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS | ENABLE_VIRTUAL_TERMINAL_INPUT)
+      setconsolemode(:out, @base_console_output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+      @pre_vt_console = if getconsolemode(:out) & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0
     end
 
     def unset_consolemode
       if @base_console_input_mode
-        setconsolemode(@base_console_input_mode | ENABLE_EXTENDED_FLAGS)
+        setconsolemode(:in, @base_console_input_mode | ENABLE_EXTENDED_FLAGS)
+        setconsolemode(:out, @base_console_output_mode)
         @base_console_input_mode = nil
+        @base_console_output_mode = nil
         if block_given?
           begin
             yield
@@ -224,24 +250,28 @@ module Runtime
       end
     end
 
-    # Calling Win32API with console handle is reported to fail after executing some external command.
-    # We need to refresh console handle and retry the call again.
-    private def call_with_console_handle(win32func, *args)
-      val = win32func.call(@hConsoleHandle, *args)
-      return val if val != 0
-
-      @hConsoleHandle = @GetStdHandle.call(STD_INPUT_HANDLE)
-      win32func.call(@hConsoleHandle, *args)
-    end
-
-    private def getconsolemode
+    private def getconsolemode(dev)
+      if dev == :in
+        handle = @hConsoleHandle
+      elsif dev == :out
+        handle = @hConsoleOutHandle
+      else
+        return nil
+      end
       mode = +"\0\0\0\0"
-      call_with_console_handle(@GetConsoleMode, mode)
+      @GetConsoleMode.call(handle, mode)
       mode.unpack1('L')
     end
 
-    private def setconsolemode(mode)
-      call_with_console_handle(@SetConsoleMode, mode)
+    private def setconsolemode(dev, mode)
+      if dev == :in
+        handle = @hConsoleHandle
+      elsif dev == :out
+        handle = @hConsoleOutHandle
+      else
+        return nil
+      end
+      @SetConsoleMode.call(handle, mode)
     end
 
     def get_console_screen_buffer_info
@@ -332,13 +362,13 @@ module Runtime
 
     private def handle_key_input(str)
       case str
-      when "\e[D", "\xE0K".b # cursor left
+      when "\e[D", "\xE0K".b, "a", "h" # cursor left
         widget.cursor(:left)
-      when "\e[A", "\xE0H".b # cursor up
+      when "\e[A", "\xE0H".b, "w", "k"  # cursor up
         widget.cursor(:up)
-      when "\e[C", "\xE0M".b # cursor right
+      when "\e[C", "\xE0M".b, "d", "l"  # cursor right
         widget.cursor(:right)
-      when "\e[B", "\xE0P".b # cursor down
+      when "\e[B", "\xE0P".b, "s", "j"  # cursor down
         widget.cursor(:down)
       when "\r" # enter
         unset_consolemode do

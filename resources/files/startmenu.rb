@@ -4,7 +4,11 @@ include RubyInstaller::Runtime::Colors
 
 app = RubyInstaller::Runtime::ConsoleUi.new
 bm = RubyInstaller::Runtime::ConsoleUi::ButtonMatrix.new ncols: 3
-bm.headline = "Ruby startmenu  -  Choose item by mouse or cursor keys and press Enter"
+unless app.pre_vt_console
+  bm.headline = "Ruby startmenu  -  Choose item by mouse or cursor keys and press Enter"
+else
+  bm.headline = "Ruby startmenu  -  Choose item by mouse or 'wasd' 'hjkl' keys and press Enter"
+end
 
 bt = <<~EOT
   irb:>
